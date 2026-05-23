@@ -1,0 +1,60 @@
+name: sdud_spend_monthly
+horizon: 12
+backtest_folds: 3
+ensemble_mode: inverse_mape
+conformal: true
+conformal_alpha: 0.20
+season_length: 12
+
+panel:
+  # Aggregates SDUD fact rows to monthly spend per (state_code, drug_class).
+  # Joins drug_class via the FDA Orange Book dim built in supplements_silver
+  # pattern (or via examples/medicaid_sdud_2026/out/dim_drug.parquet if present).
+  sql: |
+    WITH fact AS (
+      SELECT
+        state_code,
+        ndc11,
+        year, quarter,
+        SUM(total_reimb)::DOUBLE AS spend
+      FROM read_parquet('examples/medicaid_sdud_2026/out/silver/fact_sdud.parquet')
+      WHERE NOT suppressed
+      GROUP BY 1, 2, 3, 4
+    ),
+    dim AS (
+      SELECT ndc11, drug_class
+      FROM read_parquet('examples/medicaid_sdud_2026/out/silver/dim_drug.parquet')
+    )
+    SELECT
+      f.state_code,
+      COALESCE(d.drug_class, 'UNCLASSIFIED') AS drug_class,
+      make_date(f.year, ((f.quarter - 1) * 3) + 1, 1) AS period,
+      SUM(f.spend) AS spend
+    FROM fact f
+    LEFT JOIN dim d USING (ndc11)
+    GROUP BY 1, 2, 3
+    ORDER BY 1, 2, 3
+  group_cols: [state_code, drug_class]
+  time_col: period
+  target_col: spend
+  freq: QS              # quarter-start; SDUD is quarterly
+  min_obs_per_series: 12
+  fill_gaps: zero
+
+backends:
+  naive:
+    season_length: 4    # quarterly
+  sarima:
+    order:          [1, 1, 1]
+    seasonal_order: [1, 1, 0, 4]
+  prophet:
+    yearly_seasonality: true
+    growth: linear
+  lightgbm:
+    lags: [1, 2, 3, 4, 8, 12]
+    fourier_order: 2
+    season_length: 4
+    n_estimators: 800
+
+out_parquet:       examples/medicaid_sdud_2026/out/silver/forecast.parquet
+out_metrics_json:  examples/medicaid_sdud_2026/out/silver/forecast_metrics.json

@@ -5,6 +5,15 @@ pyyaml>=6.0
 azure-storage-blob>=12.19
 # optional — LLM generation / judges
 anthropic>=0.30
-# optional — real forecast ensemble (heavy)
+# forecast pipeline core (always required for services/forecast)
+pandas>=2.1
+numpy>=1.26
+# optional — forecast backends (heavy; registry skips any not installed)
 # statsmodels>=0.14
 # prophet>=1.1
+# lightgbm>=4.1
+# torch>=2.2          # enables services/forecast/backends/transformer_backend.py
+# optional — MLOps tracking (services/forecast/tracking.py mirrors to MLflow if installed)
+# mlflow>=2.12
+# test
+# pytest>=8.0

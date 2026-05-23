@@ -1,0 +1,77 @@
+name: supplements_price_monthly
+horizon: 6
+backtest_folds: 2          # ratcheted down: 977 priced rows after v2 silver
+ensemble_mode: inverse_mape
+conformal: true
+conformal_alpha: 0.20
+season_length: 12
+
+panel:
+  # Source: bronze/off_prices_full + DSLD catalog joined into the v2 silver
+  # snapshot. As of 2026-05-23, the silver layer holds 977 priced rows across
+  # 10 countries — too sparse for strict US-only filtering, so we keep the
+  # full country set and aggregate to monthly mean USD-equivalent unit price
+  # per (off_category, brand).
+  #
+  # For the Power BI session: same parquet, different consumer.
+  # Azure path (set via SUPPLEMENTS_SILVER env at runtime):
+  #   az://<acct>/healthcare/silver/snapshot=2026-05-23-v2/fact_supplement_price.parquet
+  # Local development path:
+  #   examples/supplements_2026/out/silver/snapshot=2026-05-23-v2/fact_supplement_price.parquet
+  sql: |
+    WITH ev AS (
+      SELECT
+        COALESCE(
+          NULLIF(SPLIT_PART(off_categories_tags, ',', 1), ''),
+          'uncategorised'
+        ) AS off_category,
+        LOWER(COALESCE(brand, 'unbranded')) AS brand,
+        DATE_TRUNC('month', price_date)     AS period,
+        price,
+        currency,
+        country
+      FROM read_parquet(
+        coalesce(
+          getenv('SUPPLEMENTS_SILVER'),
+          'examples/supplements_2026/out/silver/snapshot=2026-05-23-v2/fact_supplement_price.parquet'
+        )
+      )
+      WHERE price IS NOT NULL
+        AND price > 0
+    )
+    SELECT
+      off_category,
+      brand,
+      period,
+      AVG(price) AS unit_price
+    FROM ev
+    GROUP BY 1, 2, 3
+    HAVING COUNT(*) >= 1
+    ORDER BY 1, 2, 3
+  group_cols: [off_category, brand]
+  time_col: period
+  target_col: unit_price
+  freq: MS
+  min_obs_per_series: 3      # was 6; lowered for the 977-row snapshot
+  fill_gaps: ffill
+
+backends:
+  naive:
+    season_length: 12
+  sarima:
+    order:          [1, 1, 1]
+    seasonal_order: [0, 1, 1, 12]
+  prophet:
+    yearly_seasonality: true
+    growth: linear
+  lightgbm:
+    lags: [1, 2, 3, 6, 12]
+    fourier_order: 3
+    season_length: 12
+    n_estimators: 600
+  # transformer left out by default — 977 rows is too thin to train a useful
+  # global Transformer; classical + GBM are the right ensemble at this scale.
+  # Re-enable once the ACA full-DSLD egress throttle clears.
+
+out_parquet:       examples/supplements_2026/out/silver/snapshot=2026-05-23-v2/price_forecast.parquet
+out_metrics_json:  examples/supplements_2026/out/silver/snapshot=2026-05-23-v2/price_forecast_metrics.json
