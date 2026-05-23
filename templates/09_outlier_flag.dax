@@ -1,0 +1,23 @@
+// 09 — Outlier Flag (volatility-aware)
+// Pattern: ATR-style flag — outlier when |Δ| > 2 × trailing-12-mo stdev.
+// Cross-class fairness: thresholds scale with each class's own volatility.
+
+[Reimb 12M StdDev] :=
+    CALCULATE (
+        STDEV.S ( fact_sdud[total_reimb] ),
+        DATESINPERIOD ( dim_date[date], MAX ( dim_date[date] ), -12, MONTH )
+    )
+
+[Reimb Δ from Prev] :=
+    [Total Reimbursement]
+        - CALCULATE (
+              [Total Reimbursement],
+              DATEADD ( dim_date[date], -1, MONTH )
+          )
+
+[Outlier Flag] :=
+    IF (
+        ABS ( [Reimb Δ from Prev] ) > 2 * [Reimb 12M StdDev],
+        "Outlier",
+        "Within band"
+    )

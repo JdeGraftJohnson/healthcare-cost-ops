@@ -1,0 +1,15 @@
+// 05 — Per Member Per Month (PMPM)
+// Standard healthcare-actuarial normalization.
+// Denominator source documented in dashboard_spec.yml:data_sources.
+
+[Member Months] :=
+    SUM ( dim_enrollment[member_months] )
+
+[PMPM] :=
+    DIVIDE ( [Total Reimbursement], [Member Months] )
+
+[PMPY] :=
+    [PMPM] * 12
+
+[PMPM YoY $] :=
+    [PMPM] - CALCULATE ( [PMPM], SAMEPERIODLASTYEAR ( dim_date[date] ) )

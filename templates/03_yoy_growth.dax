@@ -1,0 +1,20 @@
+// 03 — YoY Growth (time-intelligence)
+// Pattern: SAMEPERIODLASTYEAR with a marked Date dimension.
+// Reference: Microsoft "Retail Analysis" sample.
+
+[Reimb PY] :=
+    CALCULATE ( [Total Reimbursement], SAMEPERIODLASTYEAR ( dim_date[date] ) )
+
+[Reimb YoY $] :=
+    [Total Reimbursement] - [Reimb PY]
+
+[Reimb YoY %] :=
+    DIVIDE ( [Reimb YoY $], [Reimb PY] )
+
+[Reimb YoY Direction] :=
+    SWITCH (
+        TRUE (),
+        [Reimb YoY %] > 0.05, "Up >5%",
+        [Reimb YoY %] < -0.05, "Down >5%",
+        "Flat ±5%"
+    )

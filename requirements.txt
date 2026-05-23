@@ -1,0 +1,10 @@
+requests>=2.31
+duckdb>=0.10
+pyyaml>=6.0
+# optional — Azure Blob upload
+azure-storage-blob>=12.19
+# optional — LLM generation / judges
+anthropic>=0.30
+# optional — real forecast ensemble (heavy)
+# statsmodels>=0.14
+# prophet>=1.1

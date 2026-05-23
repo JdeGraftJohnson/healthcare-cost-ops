@@ -1,0 +1,19 @@
+// 06 — Forecast Band
+// Forecast is precomputed in services/ingest/forecast.py (SARIMA+Prophet
+// ensemble) and lands in fact_forecast.parquet with point/lo80/hi80.
+// Power BI's native forecast is NOT used (see DASHBOARD_TEMPLATES.md).
+
+[Forecast Point] := SUM ( fact_forecast[point] )
+[Forecast Lo80]  := SUM ( fact_forecast[lo80] )
+[Forecast Hi80]  := SUM ( fact_forecast[hi80] )
+
+// Combine actuals + forecast on the same axis
+[Reimb Actual or Forecast] :=
+    IF (
+        ISBLANK ( [Total Reimbursement] ),
+        [Forecast Point],
+        [Total Reimbursement]
+    )
+
+[Forecast MAPE %] :=
+    AVERAGE ( fact_forecast[mape_holdout] )

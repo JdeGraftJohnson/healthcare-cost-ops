@@ -1,0 +1,30 @@
+// 07 — Pareto 80/20
+// Pattern: ranked bars + cumulative-share line crossing 80%.
+// Reference: Microsoft "Procurement Analysis" sample.
+
+[Drug Rank] :=
+    RANKX (
+        ALLSELECTED ( dim_drug[drug_class] ),
+        [Total Reimbursement],
+        ,
+        DESC,
+        DENSE
+    )
+
+[Cumulative Spend] :=
+    CALCULATE (
+        [Total Reimbursement],
+        FILTER (
+            ALLSELECTED ( dim_drug[drug_class] ),
+            [Drug Rank] <= MAX ( dim_drug[drug_rank_helper] )
+        )
+    )
+
+[Cumulative Share %] :=
+    DIVIDE (
+        [Cumulative Spend],
+        CALCULATE ( [Total Reimbursement], ALLSELECTED ( dim_drug[drug_class] ) )
+    )
+
+[Above 80% Threshold] :=
+    IF ( [Cumulative Share %] >= 0.80, "≥ 80%", "< 80%" )

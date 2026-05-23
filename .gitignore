@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+.envrc
+.DS_Store
+
+# Local bronze/silver caches
+/data/
+/tmp/
+
+# Run outputs (judges write here; commit only the canonical example)
+out/
+examples/*/out/
+
+# Power BI binaries
+*.pbix
+*.pbit.local
+
+# DuckDB
+*.duckdb
+*.wal

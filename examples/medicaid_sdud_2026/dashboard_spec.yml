@@ -1,0 +1,49 @@
+# Canonical dashboard spec — Medicaid SDUD prescription cost & forecast.
+# This file is the source of truth for the pipeline: ingest → generate →
+# audit → render all read from here.
+
+name: medicaid_sdud_2026
+domain: healthcare
+audience: state Medicaid program managers + CMS analysts
+
+data_sources:
+  - name: sdud
+    type: medicaid_open_data_api
+    endpoint: https://data.medicaid.gov/api/1/metastore/schemas/dataset/items
+    direct_csv_pattern: https://download.medicaid.gov/data/StateDrugUtilizationData-{year}.csv
+    years: [2020, 2021, 2022, 2023, 2024, 2025]
+  - name: state_population
+    type: us_census_acs5
+    vintage: 2024
+  - name: fda_orange_book
+    type: static_download
+    url: https://www.fda.gov/media/76860/download
+
+bronze:  az://<STORAGE_ACCOUNT>/healthcare/bronze
+silver:  az://<STORAGE_ACCOUNT>/healthcare/silver
+
+business_questions:
+  - "What is total Medicaid prescription spend, broken out by state and drug class, with 12-month forecast?"
+  - "Which 20% of drug classes drive 80% of cost, and how has that mix shifted YoY?"
+  - "Where is the brand-to-generic substitution opportunity largest?"
+  - "Which states are outliers on per-capita prescription spend?"
+
+templates: ["01", "02", "03", "04", "06", "07", "08", "09", "10"]
+
+compliance:
+  phi: false   # SDUD is state-level aggregated; no patient identifiers
+  rls: state_code
+
+forecast:
+  horizon_months: 12
+  methods: [sarima, prophet]
+  ensemble: equal_weight
+  holdout_months: 6
+
+output:
+  bim:        examples/medicaid_sdud_2026/out/model.bim
+  measures:   examples/medicaid_sdud_2026/out/measures.dax
+  narrative:  examples/medicaid_sdud_2026/out/narrative.json
+  layout:     examples/medicaid_sdud_2026/out/layout.json
+  audit:      examples/medicaid_sdud_2026/out/judges/audit.md
+  scorecard:  examples/medicaid_sdud_2026/out/judges/composite_scorecard.md

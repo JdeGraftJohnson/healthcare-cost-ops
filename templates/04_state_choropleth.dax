@@ -1,0 +1,21 @@
+// 04 — State Choropleth (geo + per-capita normalization)
+// Pattern: filled-map visual with normalized color scale.
+// Caveat: SDUD `suppressed` rows are excluded — never zeroed.
+
+[Reimb (Suppressed-Aware)] :=
+    CALCULATE (
+        [Total Reimbursement],
+        fact_sdud[suppressed] = FALSE ()
+    )
+
+[Reimb per Capita] :=
+    DIVIDE (
+        [Reimb (Suppressed-Aware)],
+        SUM ( dim_state[population] )
+    )
+
+[Suppression Rate %] :=
+    DIVIDE (
+        CALCULATE ( COUNTROWS ( fact_sdud ), fact_sdud[suppressed] = TRUE () ),
+        COUNTROWS ( fact_sdud )
+    )

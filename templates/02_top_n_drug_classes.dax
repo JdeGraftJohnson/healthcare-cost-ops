@@ -1,0 +1,27 @@
+// 02 — Top N + Other
+// Pattern: disconnected N parameter + TOPN + residual Other bucket.
+// Reference: Microsoft "Supplier Quality Analysis" sample.
+
+[N Selected] :=
+    SELECTEDVALUE ( 'N Parameter'[N], 10 )
+
+[Spend Top N] :=
+    CALCULATE (
+        [Total Reimbursement],
+        TOPN (
+            [N Selected],
+            ALLSELECTED ( dim_drug[drug_class] ),
+            [Total Reimbursement],
+            DESC
+        )
+    )
+
+[Spend Other] :=
+    CALCULATE ( [Total Reimbursement], ALLSELECTED ( dim_drug[drug_class] ) )
+        - [Spend Top N]
+
+[Top N Share %] :=
+    DIVIDE (
+        [Spend Top N],
+        CALCULATE ( [Total Reimbursement], ALLSELECTED ( dim_drug[drug_class] ) )
+    )

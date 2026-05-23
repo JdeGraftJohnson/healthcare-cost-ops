@@ -1,0 +1,22 @@
+// 08 — Brand vs Generic Mix
+// Pattern: stacked-bar of Rx-count split and dollar split, plus a
+// substitution-opportunity flag where generic share < cross-class median.
+
+[Generic Reimb] :=
+    CALCULATE ( [Total Reimbursement], dim_drug[brand_generic] = "GENERIC" )
+
+[Brand Reimb] :=
+    CALCULATE ( [Total Reimbursement], dim_drug[brand_generic] = "BRAND" )
+
+[Generic Share %] :=
+    DIVIDE ( [Generic Reimb], [Total Reimbursement] )
+
+[Cross-Class Median Generic Share] :=
+    MEDIANX ( ALL ( dim_drug[drug_class] ), [Generic Share %] )
+
+[Substitution Opportunity Flag] :=
+    IF (
+        [Generic Share %] < [Cross-Class Median Generic Share],
+        "Opportunity",
+        "On-target"
+    )

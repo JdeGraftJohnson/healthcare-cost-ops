@@ -1,0 +1,32 @@
+// 10 — Quality Scorecard (the dashboard scoring itself)
+// Surfaces the judge harness output as a Power BI page consumers can see.
+
+[Last Refresh] :=
+    MAX ( meta_refresh[refresh_ts] )
+
+[Refresh Success Rate 30d] :=
+    DIVIDE (
+        CALCULATE (
+            COUNTROWS ( meta_refresh ),
+            meta_refresh[status] = "Success",
+            meta_refresh[refresh_ts] >= TODAY () - 30
+        ),
+        CALCULATE (
+            COUNTROWS ( meta_refresh ),
+            meta_refresh[refresh_ts] >= TODAY () - 30
+        )
+    )
+
+[Judge Composite] :=
+    AVERAGE ( meta_judge[score] )
+
+[Judge Verdict] :=
+    SWITCH (
+        TRUE (),
+        [Judge Composite] >= 0.85, "Ship",
+        [Judge Composite] >= 0.70, "Tighten",
+        "Re-work"
+    )
+
+[RLS Roles Present] :=
+    COUNTROWS ( meta_governance[role_name] )

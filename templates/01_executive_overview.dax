@@ -1,0 +1,25 @@
+// 01 — Executive Overview
+// Pattern: top-of-page KPI strip + dominant trend line.
+// Reference: Microsoft "IT Spend Analysis" sample.
+// DAX syntax: https://learn.microsoft.com/en-us/dax/dax-syntax-reference
+
+[Total Reimbursement] :=
+    SUM ( fact_sdud[total_reimb] )
+
+[Total Prescriptions] :=
+    SUM ( fact_sdud[rx_count] )
+
+[Cost per Rx] :=
+    DIVIDE ( [Total Reimbursement], [Total Prescriptions] )
+
+[Total Reimbursement YTD] :=
+    TOTALYTD ( [Total Reimbursement], dim_date[date] )
+
+[Total Reimbursement PY] :=
+    CALCULATE ( [Total Reimbursement], SAMEPERIODLASTYEAR ( dim_date[date] ) )
+
+[YoY Growth %] :=
+    DIVIDE (
+        [Total Reimbursement] - [Total Reimbursement PY],
+        [Total Reimbursement PY]
+    )
