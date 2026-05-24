@@ -22,8 +22,11 @@ panel:
   sql: |
     WITH ev AS (
       SELECT
+        -- off_categories_tags is VARCHAR[]; pick the most specific
+        -- supplement-relevant tag (last one is typically the leaf
+        -- category like 'en:protein-bars'). Falls back to 'uncategorised'.
         COALESCE(
-          NULLIF(SPLIT_PART(off_categories_tags, ',', 1), ''),
+          off_categories_tags[len(off_categories_tags)],
           'uncategorised'
         ) AS off_category,
         LOWER(COALESCE(brand, 'unbranded')) AS brand,
@@ -31,9 +34,10 @@ panel:
         price,
         currency,
         country
-      FROM read_parquet('examples/supplements_2026/out/silver/snapshot=2026-05-23-v2/fact_supplement_price.parquet')
+      FROM read_parquet('${SUPPLEMENTS_SILVER_URL:-az://stasiprod1eus2.blob.core.windows.net/healthcare/silver/snapshot=2026-05-23-v2/fact_supplement_price.parquet}')
       WHERE price IS NOT NULL
         AND price > 0
+        AND price_date IS NOT NULL    -- 2 of 977 rows have NULL price_date
     )
     SELECT
       off_category,
