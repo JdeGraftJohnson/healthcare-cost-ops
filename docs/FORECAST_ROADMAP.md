@@ -80,9 +80,32 @@ must exist).
 
 ---
 
-### T1.2 — MLflow Model Registry promotion semantics
+### T1.2 — MLflow Model Registry promotion semantics — **DONE (2026-05-23)**
 
-**Status:** v0.4 ships `services/forecast/tracking.py` that mirrors
+Shipped alongside the finalize CAJ pattern:
+
+- `services/forecast/registry.py` — wraps `mlflow.tracking.MlflowClient`;
+  `register_and_promote()` registers a bundle, looks up current Production,
+  applies the `_is_better(challenger, champion, tol, higher_is_better)`
+  rule, transitions to Production (archiving the previous) when the
+  challenger improves by > `champion_tol`, otherwise Staging.
+- `services/forecast/finalize.py` — downstream CAJ entrypoint that calls
+  `register_and_promote` after writing the final `forecast.parquet`.
+- `infra/forecast_finalize_caj.bicep` — `caj-forecast-finalize-prod1`.
+- `logs/promotions.jsonl` — audit trail written even when MLflow is
+  absent (graceful skip; decision is still recorded).
+- Tests: 7 new tests covering `_is_better` direction logic, the no-MLflow
+  ledger-only path, partials → ensemble round-trip, empty-partial
+  marker handling. 40/40 total pipeline tests passing.
+
+**Known gap (v0.5):** the worker's `--score-window` arg is not yet
+wired; until it is, `final_test_metrics_by_method` will be empty when
+finalize consumes fan-out partials (the partials' forecast dates land
+past panel-end, not in the holdout window).
+
+**Original specification (preserved for reference):**
+
+v0.4 ships `services/forecast/tracking.py` that mirrors
 metrics to MLflow if `MLFLOW_TRACKING_URI` is set. No model artifacts go
 to the registry yet, no Champion / Staging / Production transitions.
 

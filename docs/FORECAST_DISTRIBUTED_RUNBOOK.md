@@ -178,6 +178,41 @@ within `--timeout-s`. The driver then exits non-zero and the caller can:
 | `forecast_part_*.parquet` empty | Partition had 0 series (small panel + many partitions) | Reduce `--partitions` |
 | All partitions completed but `n_series=0` | Silver URL wrong, or NULL `price_date` filtered everything | Verify with `az storage blob exists`; check the SQL WHERE clause |
 
+## Finalize stage (T1.2 — `caj-forecast-finalize-prod1`)
+
+Single-replica downstream CAJ that runs after the fan-out completes:
+
+- `services/forecast/finalize.py` — assembles partials → ensemble per series →
+  multi-α conformal calibration on holdout → final-test scoring →
+  `forecast.parquet` write → MLflow register + champion-challenger
+- `services/forecast/registry.py` — MLflow Model Registry wrapper;
+  registers each finalized bundle, promotes to Production when the
+  primary metric improves by > `--champion-tol`, otherwise to Staging.
+  Writes `logs/promotions.jsonl` whether or not MLflow is wired up.
+- `infra/forecast_finalize_caj.bicep` — single-replica CAJ definition;
+  shares UAMI + image with the fan-out worker (one image, two CMDs).
+
+CLI:
+
+```bash
+python -m services.forecast.finalize \
+  --config services/forecast/configs/supplements_price.yml \
+  --partial-dir /tmp/forecast/partial \
+  --out /tmp/forecast/forecast.parquet \
+  --register \
+  --bundle-path /tmp/forecast/bundle \
+  --champion-tol 0.05 \
+  --primary-metric final_test__sarima__mape
+```
+
+**Known gap (v0.5 follow-up):** the fan-out worker currently forecasts
+`cfg.horizon` periods past panel-end. For the finalize stage's
+per-holdout-period scoring to be non-degenerate, the worker needs an
+optional `--score-window` arg that emits predictions at the holdout dates
+in addition to the future horizon. Until that lands, finalize's `final_test_metrics_by_method`
+will be empty for fan-out-produced partials; the ensemble + write path
+works regardless.
+
 ## Coordination with the rest of the pipeline
 
 This driver runs the **fit** stage only. It does NOT run:
