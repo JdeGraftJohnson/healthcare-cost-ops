@@ -160,6 +160,40 @@ implements the M-query.
 
 ---
 
+### Tier-1 dataset parity — both supplements and SDUD covered (2026-05-23)
+
+Closing the gap raised in the same session:
+
+| Item | Supplements | SDUD |
+|---|---|---|
+| Distributed fan-out | local-mode validated (3 partitions × 114 series, 3.9 s) | local-mode validated (4 partitions × 52 states, 1.9 s) |
+| Finalize stage | local-mode validated (684 rows ensemble) | local-mode validated (208 rows ensemble) |
+| Real Azure silver | `stasiprod1eus2/healthcare/silver/snapshot=2026-05-23-v2/` (read working) | local-only at `examples/medicaid_sdud_2026/out/silver/snapshot=2026-05-23-cms/`; **Azure upload pending operator RBAC grant** (current session has Reader, needs Contributor) |
+| Power BI binding contract | docs done; supplements `forecast.parquet` exists in Azure | docs apply by construction; SDUD `forecast.parquet` exists locally only |
+
+**To grant Contributor on the healthcare container (one-line):**
+
+```bash
+SP=$(az ad signed-in-user show --query id -o tsv)
+az role assignment create \
+  --assignee "$SP" \
+  --role "Storage Blob Data Contributor" \
+  --scope "/subscriptions/f51a19c6-da25-45ae-8980-2a1e5dbff1e2/resourceGroups/rg-asi-prod1-eus2/providers/Microsoft.Storage/storageAccounts/stasiprod1eus2/blobServices/default/containers/healthcare"
+```
+
+Then the SDUD upload + Azure-resident SDUD forecast becomes:
+
+```bash
+az storage blob upload \
+  --account-name stasiprod1eus2 --container-name healthcare \
+  --name "silver/snapshot=2026-05-23-cms/fact_sdud.parquet" \
+  --file  "examples/medicaid_sdud_2026/out/silver/snapshot=2026-05-23-cms/fact_sdud.parquet" \
+  --auth-mode login --overwrite true
+
+SDUD_SILVER_URL='az://stasiprod1eus2.blob.core.windows.net/healthcare/silver/snapshot=2026-05-23-cms/fact_sdud.parquet' \
+  python -m services.forecast --config services/forecast/configs/sdud_state_spend.yml
+```
+
 ### T1.4 — Real Azure silver swap path — **DONE (2026-05-23)**
 
 Shipped. The forecast pipeline now reads the real supplements silver
