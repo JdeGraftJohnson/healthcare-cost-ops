@@ -15,9 +15,33 @@ trail is in `FORECAST_PIPELINE_AUDIT.md` + `FORECAST_PIPELINE_AUDIT_DEEP.md`.
 
 ## Tier 1 — production-deploy blockers
 
-### T1.1 — Distributed SARIMA fan-out on Azure Container Apps
+### T1.1 — Distributed SARIMA fan-out on Azure Container Apps — **CODE+INFRA DONE (2026-05-23), DEPLOY GATED**
 
-**Status:** ProcessPoolExecutor parallelism shipped in v0.4
+Code, container image definition, Bicep infra, runbook all landed.
+End-to-end local mode (`--mode local`) validated against the real Azure
+silver: 3 partitions × 114 series → 2,736 forecast rows in 3.9 s.
+
+Components:
+- `services/forecast/distributed.py` — partition + assemble + poll helpers
+- `services/forecast/aca_worker.py` — per-partition CLI worker
+- `services/forecast/distributed_driver.py` — fan-out + concat CLI
+  (`--mode local|aca`)
+- `services/forecast/aca/Dockerfile` + `requirements.txt` — slim
+  python:3.12-slim image with statsmodels + duckdb (no LightGBM /
+  Prophet / torch — only what SARIMA + naive baselines need)
+- `infra/forecast_sarima_caj.bicep` — CAJ `caj-forecast-sarima-prod1` +
+  user-assigned MI `id-caj-forecast-prod1` + container-scoped RBAC
+- `docs/FORECAST_DISTRIBUTED_RUNBOOK.md` — build, deploy, invoke,
+  troubleshoot
+
+What's NOT done: `az acr build`, `az deployment group create`, and an
+actual fan-out invocation in prod1. Those are operator-gated cloud
+spend (~$0.80 per full SDUD run, ~$0.003 per ACR build per
+`feedback_azure_cloud_job_runs`). Run the runbook when ready.
+
+**Original specification (preserved for reference):**
+
+ProcessPoolExecutor parallelism shipped in v0.4
 (`SarimaModel(n_workers=N)`), but local cores top out at 4-8. The SDUD
 panel is ~15k series × ~5s per fit = ~21 hr sequential. Need cloud
 fan-out.
