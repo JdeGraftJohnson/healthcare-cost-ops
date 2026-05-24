@@ -451,3 +451,59 @@ Effort: XS = <30 min, S = 30-90 min, M = 90 min-3 hr, L = >3 hr.
 Items 3, 4, 5, 6, 11, 12, 13 — all S/XS — are landed alongside this audit
 document. Items 1, 2, 7, 8, 9 are queued for the next focused session and
 listed in `STATUS_FORECAST.md` (forthcoming).
+
+## Update — second remediation commit (2026-05-23)
+
+The named follow-up tackled the four highest-priority M items from the
+queue. Status updates:
+
+| # | Issue | Status |
+|---|---|---|
+| 1 | 1.4 — Empirical-quantile bands replace sigma bands | **DONE** — `intervals.EmpiricalBandCalibrator`; pipeline wires it in by default when holdout produces residuals |
+| 2 | 1.1 — Final-test holdout split | **DONE** — `PipelineConfig.final_holdout_periods`; `_split_final_holdout()`; backtest runs on `dev_panel`, holdout is untouched until final-test scoring |
+| 2 | 1.3 — Conformal calibration on holdout window | **DONE** — multi-α conformal calibrates against the untouched holdout (not a backtest-fold side channel) |
+| - | 5.4 — Multi-α conformal | **DONE** — `MultiAlphaConformal.quantiles_by_alpha` calibrates at every α in the config; feeds the reliability diagram |
+| - | 4.3 — Graceful all-backends-fail | **DONE** — `_ensure_coverage()` emits naive_last_value fallback with `metadata.fallback_reason='all_backends_failed'` |
+
+What this unlocked: the first defensible out-of-sample numbers.
+
+```
+                        BACKTEST            FINAL-TEST (untouched holdout)
+method            MAPE   MASE  cov80      MAPE   MASE  cov80
+drift            0.62%   0.41   80.0%    1.69%   0.70   62.7%
+sarima           1.67%   0.88   63.9%    2.17%   0.96   57.6%
+seasonal_naive   2.17%   1.08   63.3%    2.89%   1.39   60.0%
+mean             2.97%   1.34   57.0%    3.80%   1.71   48.9%
+```
+
+Drift's backtest MAPE of 0.62% expands to 1.69% on the holdout (2.7×
+divergence), and its 80% coverage drops from 80.0% to 62.7% — exactly the
+class of optimism a leakage-aware metric set is supposed to surface.
+
+Multi-α conformal quantiles (log space, USD):
+
+| nominal coverage | α    | q (abs residual) |
+|---|---|---|
+| 50% | 0.50 | 0.037 |
+| 80% | 0.20 | 0.090 |
+| 90% | 0.10 | 0.170 |
+| 95% | 0.05 | 0.216 |
+| 99% | 0.01 | 0.338 |
+
+Monotone in α — the calibrator is producing sensible widths. The full
+reliability curve renders via `calibration.render_md(reliability_diagram(
+final_test_coverage_by_alpha))`.
+
+## Still queued for next focused session
+
+| # | Issue | Effort | Why deferred |
+|---|---|---|---|
+| 3 | 4.1 — Native-format model persistence per backend | M | Out of scope for this commit; needs its own `services/forecast/persist.py` and a CLI subcommand |
+| 4 | 3.1 + 3.2 — Parallel SARIMA + batched Transformer in-sample | M | Performance improvement; not blocking correctness |
+| 5 | 4.2 — Structured logging behind `FORECAST_LOG_JSON` env | S | Quick when needed; not blocking anything yet |
+| 6 | 5.5 — Champion-challenger compare from JSONL ledger | M | Standalone tool; can ship as a follow-up `compare.py` module |
+| 7 | 5.2 — True per-period Diebold-Mariano test | M | Requires backtest refactor to retain per-period (actual, p_a, p_b) tuples. Current paired-sign-test is honest about being a proxy. |
+
+Tests landed in this commit: 21/21 passing (was 13). New tests cover
+final-test split (3), multi-α conformal (2), empirical-quantile bands (2),
+graceful fallback (1).

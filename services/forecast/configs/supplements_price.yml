@@ -1,9 +1,10 @@
 name: supplements_price_monthly
 horizon: 6
-backtest_folds: 2          # ratcheted down: 977 priced rows after v2 silver
+backtest_folds: 2                # ratcheted down: 977 priced rows after v2 silver
 ensemble_mode: inverse_mape
 conformal: true
-conformal_alpha: 0.20
+conformal_alphas: [0.50, 0.20, 0.10, 0.05, 0.01]   # multi-α for reliability curve
+final_holdout_periods: 6         # untouched out-of-sample window for unbiased eval
 season_length: 12
 
 panel:

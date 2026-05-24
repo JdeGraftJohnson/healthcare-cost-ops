@@ -155,6 +155,151 @@ def test_calibration_render_md():
     assert "0.50" in md and "0.80" in md and "0.95" in md
 
 
+# ── Final-test holdout split (Issue 1.1) ────────────────────────────────────
+
+def test_split_final_holdout(panel):
+    from services.forecast.pipeline import _split_final_holdout
+    dev, holdout = _split_final_holdout(panel, time_col="period", holdout_periods=6)
+    # Holdout has exactly 6 unique periods × 4 series = 24 rows.
+    assert holdout["period"].nunique() == 6
+    assert dev["period"].nunique() == 60 - 6
+    # No temporal overlap.
+    assert dev["period"].max() < holdout["period"].min()
+
+
+def test_split_final_holdout_zero_returns_full_panel(panel):
+    from services.forecast.pipeline import _split_final_holdout
+    dev, holdout = _split_final_holdout(panel, time_col="period", holdout_periods=0)
+    assert len(holdout) == 0
+    assert len(dev) == len(panel)
+
+
+def test_split_final_holdout_raises_when_too_large(panel):
+    from services.forecast.pipeline import _split_final_holdout
+    with pytest.raises(RuntimeError, match="periods"):
+        _split_final_holdout(panel, time_col="period", holdout_periods=999)
+
+
+# ── Multi-alpha conformal (Issue 5.4) ───────────────────────────────────────
+
+def test_multi_alpha_conformal_quantiles_are_monotone():
+    from services.forecast.intervals import calibrate_multi
+    # Synthesize calibration data: actual = pred + N(0, sigma).
+    rng = np.random.default_rng(5)
+    n = 80
+    times = pd.date_range("2024-01-01", periods=n, freq="MS")
+    actual_df = pd.DataFrame({
+        "state": ["S0"] * n,
+        "cat":   ["X"]  * n,
+        "period": times,
+        "y": rng.normal(50, 5, n) + 10 * np.sin(np.arange(n) * 0.5),
+    })
+    pred_series = pd.Series(50 + 10 * np.sin(np.arange(n) * 0.5), index=times)
+    calib = calibrate_multi(
+        calib_actual=actual_df,
+        calib_pred={("S0", "X"): pred_series},
+        time_col="period", target_col="y", group_cols=["state", "cat"],
+        alphas=(0.50, 0.20, 0.10, 0.05, 0.01),
+    )
+    qs = calib.quantiles_by_alpha
+    # Lower alpha → wider band → larger q.
+    assert qs[0.50] < qs[0.20] < qs[0.10] < qs[0.05] < qs[0.01]
+
+
+def test_multi_alpha_conformal_widens_at_80_and_95(panel):
+    from services.forecast.intervals import MultiAlphaConformal
+    reg = available()
+    model = reg["naive"](season_length=12)
+    results = model.fit_predict(
+        panel, group_cols=GROUP_COLS, time_col=TIME_COL,
+        target_col=TARGET_COL, horizon=HORIZON, freq=FREQ,
+    )
+    # Stiff multi-alpha calibrator: q=5 at alpha=0.20, q=10 at alpha=0.05.
+    cal = MultiAlphaConformal(quantiles_by_alpha={0.20: 5.0, 0.05: 10.0})
+    widened = cal.widen(results)
+    for orig, new in zip(results, widened):
+        # Bands should be wider than they were natively (this is a smoke check
+        # — calibrator floor will use max of q vs 25% of native band).
+        new_w80 = (new.hi80 - new.lo80).abs().mean()
+        orig_w80 = (orig.hi80 - orig.lo80).abs().mean() if orig.lo80 is not None else 0
+        assert new_w80 >= max(orig_w80 * 0.25, 5.0) - 0.01
+
+
+# ── Empirical-quantile bands (Issue 1.4) ────────────────────────────────────
+
+def test_empirical_band_calibration_quantiles():
+    from services.forecast.intervals import calibrate_empirical_bands
+    rng = np.random.default_rng(11)
+    # Method A: tight residuals, method B: wide residuals.
+    df = pd.DataFrame({
+        "method": ["A"] * 200 + ["B"] * 200,
+        "residual": np.concatenate([rng.normal(0, 1, 200), rng.normal(0, 5, 200)]),
+    })
+    cal = calibrate_empirical_bands(df, alphas=(0.20, 0.05))
+    a_lo80, a_hi80 = cal.quantiles_by_method["A"][0.20]
+    b_lo80, b_hi80 = cal.quantiles_by_method["B"][0.20]
+    # B's 80% band should be ~5x wider than A's.
+    assert (b_hi80 - b_lo80) > 3 * (a_hi80 - a_lo80)
+    # 95% band should be wider than 80% band for each method.
+    a_lo95, a_hi95 = cal.quantiles_by_method["A"][0.05]
+    assert (a_hi95 - a_lo95) > (a_hi80 - a_lo80)
+
+
+def test_empirical_band_applies_to_forecast(panel):
+    from services.forecast.intervals import EmpiricalBandCalibrator
+    reg = available()
+    model = reg["naive"](season_length=12)
+    results = model.fit_predict(
+        panel, group_cols=GROUP_COLS, time_col=TIME_COL,
+        target_col=TARGET_COL, horizon=HORIZON, freq=FREQ,
+    )
+    # Asymmetric bands: lo offset = -3, hi offset = +7 → all forecasts widen
+    # to (point - 3, point + 7).
+    cal = EmpiricalBandCalibrator(quantiles_by_method={
+        "seasonal_naive": {0.20: (-3.0, 7.0), 0.05: (-6.0, 12.0)},
+    })
+    out = cal.apply(results)
+    for r in out:
+        widths = (r.hi80 - r.lo80).abs()
+        # 7 - (-3) = 10 ± floating point.
+        assert (widths - 10.0).abs().max() < 1e-9
+
+
+# ── Graceful all-backends-fail (Issue 4.3) ──────────────────────────────────
+
+def test_ensure_coverage_fills_missing_series():
+    from services.forecast.pipeline import _ensure_coverage
+    # Build a 2-series panel; ensemble produced no result for series ('S1','X').
+    rng = np.random.default_rng(0)
+    n = 24
+    periods = pd.date_range("2023-01-01", periods=n, freq="MS")
+    panel = pd.concat([
+        pd.DataFrame({"state": ["S0"] * n, "cat": ["X"] * n, "period": periods, "y": rng.normal(50, 5, n)}),
+        pd.DataFrame({"state": ["S1"] * n, "cat": ["X"] * n, "period": periods, "y": rng.normal(80, 8, n)}),
+    ], ignore_index=True)
+    # Ensemble only has S0.
+    from services.forecast.base import ForecastResult
+    fut = pd.date_range("2025-01-01", periods=3, freq="MS")
+    ens = [ForecastResult(
+        series_key=("S0", "X"), method="ensemble", horizon=3,
+        point=pd.Series([50.0, 50.0, 50.0], index=fut),
+        lo80=pd.Series([45.0]*3, index=fut), hi80=pd.Series([55.0]*3, index=fut),
+        lo95=pd.Series([42.0]*3, index=fut), hi95=pd.Series([58.0]*3, index=fut),
+        in_sample_mape=None,
+    )]
+    fallback: set = set()
+    out = _ensure_coverage(
+        ens, panel=panel, group_cols=["state", "cat"],
+        time_col="period", target_col="y",
+        horizon=3, freq="MS", fallback_series_out=fallback,
+    )
+    keys = {r.series_key for r in out}
+    assert ("S0", "X") in keys and ("S1", "X") in keys
+    assert ("S1", "X") in fallback
+    s1 = [r for r in out if r.series_key == ("S1", "X")][0]
+    assert s1.metadata.get("fallback_reason") == "all_backends_failed"
+
+
 def test_drift_psi_and_ks():
     rng = np.random.default_rng(7)
     ref = rng.normal(0.0, 1.0, size=400)
