@@ -6,8 +6,13 @@ import pandas as pd
 import pytest
 
 from services.forecast.backends import available
+from services.forecast.calibration import (
+    compute_multi_alpha_coverage,
+    reliability_diagram,
+    render_md,
+)
 from services.forecast.ensemble import ensemble
-from services.forecast.eval import rolling_origin_backtest
+from services.forecast.eval import diebold_mariano, rolling_origin_backtest
 from services.forecast.monitor import compute_psi, ks_two_sample, evaluate_drift
 
 
@@ -91,9 +96,63 @@ def test_rolling_backtest(panel):
         freq=FREQ, season_length=12,
     )
     assert len(folds) == 2
-    assert {"method", "mape", "smape", "mase"}.issubset(summary.columns)
-    # Naive should run; at least one method should report a MAPE.
+    # All standard regression metrics emitted.
+    expected = {"method", "mape", "smape", "mase", "rmse", "mae", "r2", "bias",
+                "coverage_80", "coverage_95", "interval_width_80",
+                "directional_acc"}
+    missing = expected - set(summary.columns)
+    assert not missing, f"missing eval metrics: {missing}"
     assert summary["mape"].notna().any()
+
+
+def test_diebold_mariano():
+    rng = np.random.default_rng(3)
+    a = rng.normal(50, 10, 60)
+    # Two forecasters: one is the actual + small noise (good), one is the
+    # actual + large noise (bad). DM should flag the difference as significant.
+    p_good = a + rng.normal(0, 1, 60)
+    p_bad  = a + rng.normal(0, 8, 60)
+    dm, p = diebold_mariano(a, p_good, p_bad, h=1)
+    assert not np.isnan(dm)
+    assert dm < 0           # negative means good < bad in squared-error loss
+    assert p < 0.05
+
+
+def test_calibration_reliability_perfect():
+    # Perfect calibration: empirical == nominal.
+    cov = {0.50: 0.50, 0.80: 0.80, 0.95: 0.95}
+    curve = reliability_diagram(cov)
+    assert curve.ece == 0.0
+    assert curve.over_confident_at == []
+    assert curve.under_confident_at == []
+
+
+def test_calibration_reliability_over_confident():
+    # Over-confident: empirical < nominal at 80% and 95%.
+    cov = {0.50: 0.50, 0.80: 0.65, 0.95: 0.80}
+    curve = reliability_diagram(cov)
+    assert curve.ece > 0.0
+    assert 0.80 in curve.over_confident_at
+    assert 0.95 in curve.over_confident_at
+
+
+def test_calibration_multi_alpha_coverage():
+    rng = np.random.default_rng(2)
+    n = 500
+    point = rng.normal(100, 10, n)
+    sigma = np.full(n, 5.0)
+    actual = point + rng.normal(0, 5, n)
+    cov = compute_multi_alpha_coverage(actual, point, sigma, alphas=(0.50, 0.80, 0.95))
+    # With true sigma matching the noise, coverage should be close to nominal.
+    for alpha, emp in cov.items():
+        assert abs(emp - alpha) < 0.06, f"coverage at α={alpha}: {emp}"
+
+
+def test_calibration_render_md():
+    cov = {0.5: 0.48, 0.8: 0.74, 0.95: 0.90}
+    md = render_md(reliability_diagram(cov))
+    assert "Expected Calibration Error" in md
+    assert "0.50" in md and "0.80" in md and "0.95" in md
 
 
 def test_drift_psi_and_ks():

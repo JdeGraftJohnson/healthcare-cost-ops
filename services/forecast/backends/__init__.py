@@ -10,8 +10,16 @@ from services.forecast.backends.naive import SeasonalNaive
 LOG = logging.getLogger("forecast.backends")
 
 
+BACKEND_NAMES = ("naive", "mean", "drift", "sarima", "prophet", "lightgbm", "transformer")
+
+
 def available() -> dict[str, Type[ForecastModel]]:
-    reg: dict[str, Type[ForecastModel]] = {"naive": SeasonalNaive}
+    from services.forecast.backends.baseline import MeanModel, RandomWalkDriftModel
+    reg: dict[str, Type[ForecastModel]] = {
+        "naive": SeasonalNaive,
+        "mean": MeanModel,
+        "drift": RandomWalkDriftModel,
+    }
     try:
         from services.forecast.backends.sarima import SarimaModel
         reg["sarima"] = SarimaModel

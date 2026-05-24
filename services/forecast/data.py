@@ -20,6 +20,7 @@ class PanelSpec:
     freq: str                # pandas offset alias: 'MS', 'W-MON', 'QS'
     min_obs_per_series: int  # drop sparse series below this floor
     fill_gaps: str = "zero"  # 'zero' | 'ffill' | 'drop'
+    log_transform: bool = False   # fit on log1p(target); back-transform forecasts
 
 
 def load_panel(con: duckdb.DuckDBPyConnection, spec: PanelSpec) -> pd.DataFrame:
@@ -29,11 +30,31 @@ def load_panel(con: duckdb.DuckDBPyConnection, spec: PanelSpec) -> pd.DataFrame:
     if df.empty:
         raise RuntimeError("panel SQL returned zero rows")
     df[spec.time_col] = pd.to_datetime(df[spec.time_col])
+    # Data quality: drop any duplicated (group, time) before regularization.
+    dup_mask = df.duplicated(subset=list(spec.group_cols) + [spec.time_col], keep="last")
+    if dup_mask.any():
+        LOG.warning("dropping %d duplicate (group,time) rows", int(dup_mask.sum()))
+        df = df[~dup_mask].copy()
+    if spec.log_transform:
+        import numpy as np
+        df[spec.target_col] = np.log1p(df[spec.target_col].clip(lower=0))
+        LOG.info("applied log1p transform to %s", spec.target_col)
     df = _regularize(df, spec)
     df = _drop_short_series(df, spec)
-    LOG.info("panel rows=%d series=%d span=%s..%s",
+    LOG.info("panel rows=%d series=%d span=%s..%s target_col=%s%s",
              len(df), df.groupby(list(spec.group_cols)).ngroups,
-             df[spec.time_col].min().date(), df[spec.time_col].max().date())
+             df[spec.time_col].min().date(), df[spec.time_col].max().date(),
+             spec.target_col, " (log1p)" if spec.log_transform else "")
+    return df
+
+
+def back_transform(df: pd.DataFrame, spec: PanelSpec, cols: Sequence[str]) -> pd.DataFrame:
+    if not spec.log_transform:
+        return df
+    import numpy as np
+    for c in cols:
+        if c in df.columns:
+            df[c] = np.expm1(df[c])
     return df
 
 

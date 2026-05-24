@@ -39,6 +39,13 @@ def _hash_config(d: Mapping[str, Any]) -> str:
     return hashlib.sha256(json.dumps(d, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
 
+_ENV_ALLOW = (
+    "MLFLOW_TRACKING_URI", "MLFLOW_EXPERIMENT",
+    "LANGCHAIN_PROJECT", "LANGSMITH_PROJECT",
+    "FORECAST_LOG_JSON",
+)
+
+
 def _env() -> dict[str, str]:
     out: dict[str, str] = {
         "python": sys.version.split()[0],
@@ -50,6 +57,13 @@ def _env() -> dict[str, str]:
             out[pkg] = getattr(mod, "__version__", "unknown")
         except Exception:
             pass
+    # Allow-list only — NEVER expose API keys, connection strings, or any *_KEY/*_SECRET/
+    # *_CONNECTION env values into the JSONL ledger (cf. feedback_no_pii_in_verify).
+    import os as _os
+    for k in _ENV_ALLOW:
+        v = _os.environ.get(k)
+        if v:
+            out[f"env_{k}"] = v
     return out
 
 

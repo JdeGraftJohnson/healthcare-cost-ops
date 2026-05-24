@@ -56,14 +56,16 @@ def add_rolling(
     target_col: str,
     windows: Sequence[int],
 ) -> pd.DataFrame:
-    g = df.groupby(list(group_cols), sort=False)[target_col]
-    # shift(1) before rolling so the window never sees the current period.
+    """Rolling mean + std per group, computed on a 1-period-shifted target to
+    prevent leakage. Strictly per-group: rolling windows never cross series.
+    """
+    g = df.groupby(list(group_cols), sort=False, group_keys=False)[target_col]
     shifted = g.shift(1)
+    # Re-group the shifted column by the same keys so rolling stays per-series.
+    sh_g = shifted.groupby([df[c] for c in group_cols])
     for w in windows:
-        df[f"rmean_{w}"] = shifted.rolling(w, min_periods=max(2, w // 2)).mean().reset_index(level=0, drop=True) if False else (
-            shifted.groupby(df[list(group_cols)[0]] if len(group_cols) == 1 else [df[c] for c in group_cols]).transform(lambda s: s.rolling(w, min_periods=max(2, w // 2)).mean())
-        )
-        df[f"rstd_{w}"] = shifted.groupby(df[list(group_cols)[0]] if len(group_cols) == 1 else [df[c] for c in group_cols]).transform(lambda s: s.rolling(w, min_periods=max(2, w // 2)).std())
+        df[f"rmean_{w}"] = sh_g.transform(lambda s: s.rolling(w, min_periods=max(2, w // 2)).mean())
+        df[f"rstd_{w}"]  = sh_g.transform(lambda s: s.rolling(w, min_periods=max(2, w // 2)).std())
     return df
 
 

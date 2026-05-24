@@ -24,16 +24,49 @@ class ConformalCalibrator:
     quantile_abs_resid: float
 
     def widen(self, results: Sequence[ForecastResult]) -> list[ForecastResult]:
+        # Skip conformal widening when calibration produced a degenerate q.
+        # An exactly-zero or near-zero q means the held-out fold's residuals
+        # were vanishingly small, which either reflects a perfect fit (rare
+        # in real data — usually means the calibration setup matched the
+        # train data too closely) or that the calibration produced no usable
+        # residuals. In either case, keeping the model-native bands is more
+        # honest than collapsing intervals to zero width.
+        if self.quantile_abs_resid <= 1e-9:
+            return list(results)
         widened = []
-        z = 1.96 if abs(self.alpha - 0.05) < 1e-6 else 1.2816
         for r in results:
-            lo = r.point - self.quantile_abs_resid
-            hi = r.point + self.quantile_abs_resid
+            # Floor: never let the conformal band be tighter than 25% of the
+            # model's own band on each side. Marginal-coverage guarantees are
+            # one-sided (widening only); narrowing is unsafe.
+            point = r.point
+            q = self.quantile_abs_resid
             if abs(self.alpha - 0.05) < 1e-6:
+                native_half = (
+                    ((r.hi95 - r.lo95).abs() / 2.0) if (r.hi95 is not None and r.lo95 is not None)
+                    else 0
+                )
+                eff = q.__class__(q) if hasattr(q, "__class__") else q
+                lo = point - max_series(q, 0.25 * native_half)
+                hi = point + max_series(q, 0.25 * native_half)
                 widened.append(_replace(r, lo95=lo, hi95=hi))
             else:
+                native_half = (
+                    ((r.hi80 - r.lo80).abs() / 2.0) if (r.hi80 is not None and r.lo80 is not None)
+                    else 0
+                )
+                lo = point - max_series(q, 0.25 * native_half)
+                hi = point + max_series(q, 0.25 * native_half)
                 widened.append(_replace(r, lo80=lo, hi80=hi))
         return widened
+
+
+def max_series(a, b):
+    """Element-wise max for scalar/series mixed inputs."""
+    import pandas as pd
+    if isinstance(b, pd.Series) or isinstance(a, pd.Series):
+        import numpy as np
+        return np.maximum(a, b)
+    return max(a, b)
 
 
 def calibrate(

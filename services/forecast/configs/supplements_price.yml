@@ -30,12 +30,7 @@ panel:
         price,
         currency,
         country
-      FROM read_parquet(
-        coalesce(
-          getenv('SUPPLEMENTS_SILVER'),
-          'examples/supplements_2026/out/silver/snapshot=2026-05-23-v2/fact_supplement_price.parquet'
-        )
-      )
+      FROM read_parquet('examples/supplements_2026/out/silver/snapshot=2026-05-23-v2/fact_supplement_price.parquet')
       WHERE price IS NOT NULL
         AND price > 0
     )
@@ -54,8 +49,11 @@ panel:
   freq: MS
   min_obs_per_series: 3      # was 6; lowered for the 977-row snapshot
   fill_gaps: ffill
+  log_transform: true        # supplement prices are strictly positive; fit on log1p
 
 backends:
+  mean: {}
+  drift: {}
   naive:
     season_length: 12
   sarima:

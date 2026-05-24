@@ -10,7 +10,7 @@ import pandas as pd
 from services.forecast.base import ForecastResult, SeriesKey
 
 
-EnsembleMode = Literal["equal_weight", "inverse_mape", "best_only"]
+EnsembleMode = Literal["equal_weight", "inverse_mape", "best_only", "best_per_series"]
 
 
 def ensemble(
@@ -68,7 +68,10 @@ def _weights(rs: list[ForecastResult], mode: EnsembleMode) -> list[float]:
     n = len(rs)
     if mode == "equal_weight":
         return [1.0 / n] * n
-    if mode == "best_only":
+    if mode in ("best_only", "best_per_series"):
+        # best_per_series picks the lowest-MAPE backend *for this specific
+        # series*; called per-series so the global best may differ from the
+        # per-series best. Same code path either way.
         scored = [(i, r.in_sample_mape if r.in_sample_mape is not None else float("inf")) for i, r in enumerate(rs)]
         best = min(scored, key=lambda x: x[1])[0]
         return [1.0 if i == best else 0.0 for i in range(n)]

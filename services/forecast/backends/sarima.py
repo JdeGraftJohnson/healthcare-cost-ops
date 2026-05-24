@@ -82,6 +82,24 @@ class SarimaModel(ForecastModel):
             except Exception:
                 pass
 
+            # Sanity gate: SARIMA can extrapolate to absurd values when the
+            # fitted parameter set is unstable (unit-root or near-unit-root).
+            # If any forecast point exceeds the in-sample range by more than
+            # 5x, or any interval bound exceeds 100x in absolute value, fall
+            # back to mean + std bands (same shape as the failure path).
+            ts_max = float(np.nanmax(np.abs(ts.values))) if len(ts) else 1.0
+            point_max = float(np.nanmax(np.abs(point.values)))
+            ci95_max = float(np.nanmax(np.abs(ci95.values))) if not ci95.empty else 0.0
+            unstable = (point_max > 5.0 * (ts_max + 1.0)) or (ci95_max > 100.0 * (ts_max + 1.0))
+            if unstable:
+                LOG.warning("sarima produced extreme values for %s (ts_max=%.2f point_max=%.2g ci95_max=%.2g); falling back to mean",
+                            keys, ts_max, point_max, ci95_max)
+                future_idx = point.index
+                point = pd.Series([ts.mean()] * len(future_idx), index=future_idx)
+                sigma = float(ts.std(ddof=1) or abs(ts.mean()) * 0.15 or 1.0)
+                ci80 = pd.DataFrame({"lower": point - 1.2816 * sigma, "upper": point + 1.2816 * sigma})
+                ci95 = pd.DataFrame({"lower": point - 1.96 * sigma,   "upper": point + 1.96 * sigma})
+
             results.append(
                 ForecastResult(
                     series_key=tuple(keys),

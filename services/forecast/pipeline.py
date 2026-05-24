@@ -35,6 +35,9 @@ class PipelineConfig:
     season_length: int
     out_parquet: str
     out_metrics_json: str
+    seed: int = 42
+    track: bool = True
+    run_dm_matrix: bool = True              # Diebold-Mariano matrix in metrics JSON
 
 
 def load_config(path: str | Path) -> PipelineConfig:
@@ -47,6 +50,7 @@ def load_config(path: str | Path) -> PipelineConfig:
         freq=raw["panel"]["freq"],
         min_obs_per_series=int(raw["panel"].get("min_obs_per_series", 24)),
         fill_gaps=raw["panel"].get("fill_gaps", "zero"),
+        log_transform=bool(raw["panel"].get("log_transform", False)),
     )
     return PipelineConfig(
         name=raw["name"],
@@ -60,29 +64,53 @@ def load_config(path: str | Path) -> PipelineConfig:
         season_length=int(raw.get("season_length", 12)),
         out_parquet=raw["out_parquet"],
         out_metrics_json=raw["out_metrics_json"],
+        seed=int(raw.get("seed", 42)),
+        track=bool(raw.get("track", True)),
+        run_dm_matrix=bool(raw.get("run_dm_matrix", True)),
     )
 
 
-def _instantiate(name: str, kwargs: dict) -> ForecastModel:
+def _instantiate(name: str, kwargs: dict) -> ForecastModel | None:
+    import inspect
     reg = available_backends()
     if name not in reg:
-        raise RuntimeError(
-            f"backend {name!r} not available. Installed backends: {list(reg)}. "
-            f"Install [forecast] extras: pip install statsmodels prophet lightgbm"
+        LOG.warning(
+            "backend %r requested but not installed (have %s). Skipping. "
+            "Install [forecast] extras to enable.", name, list(reg),
         )
-    return reg[name](**kwargs)
+        return None
+    cls = reg[name]
+    # Filter kwargs to those the backend's __init__ actually accepts.
+    accepted = set(inspect.signature(cls.__init__).parameters.keys()) - {"self"}
+    safe = {k: v for k, v in kwargs.items() if k in accepted}
+    return cls(**safe)
 
 
 def run_pipeline(cfg: PipelineConfig, con: duckdb.DuckDBPyConnection) -> dict:
     import time as _time
+    import random as _random
+    import numpy as _np
+    _random.seed(cfg.seed); _np.random.seed(cfg.seed)
+    try:
+        import torch as _torch
+        _torch.manual_seed(cfg.seed)
+    except ImportError:
+        pass
     _t0 = _time.time()
-    LOG.info("forecast pipeline start name=%s horizon=%d", cfg.name, cfg.horizon)
+    LOG.info("forecast pipeline start name=%s horizon=%d seed=%d", cfg.name, cfg.horizon, cfg.seed)
     panel = load_panel(con, cfg.panel)
     group_cols = list(cfg.panel.group_cols)
 
-    models: dict[str, ForecastModel] = {
-        name: _instantiate(name, kw or {}) for name, kw in cfg.backends.items()
-    }
+    models: dict[str, ForecastModel] = {}
+    for name, kw in cfg.backends.items():
+        kw = dict(kw or {})
+        if "seed" not in kw:
+            kw["seed"] = cfg.seed
+        inst = _instantiate(name, kw)
+        if inst is not None:
+            models[name] = inst
+    if not models:
+        raise RuntimeError("no forecast backends available — install at least one")
     LOG.info("instantiated backends: %s", list(models))
 
     # Backtest first so MAPEs feed inverse-mape ensemble weights.
@@ -147,10 +175,57 @@ def run_pipeline(cfg: PipelineConfig, con: duckdb.DuckDBPyConnection) -> dict:
 
     # Persist forecasts.
     long = pd.concat([r.to_long_df(group_cols) for r in ens], ignore_index=True)
+    # Back-transform from log space so the persisted forecast is in original units.
+    if cfg.panel.log_transform:
+        from services.forecast.data import back_transform
+        long = back_transform(long, cfg.panel, ["point", "lo80", "hi80", "lo95", "hi95"])
+        LOG.info("back-transformed log forecast to original units")
     out = Path(cfg.out_parquet)
     out.parent.mkdir(parents=True, exist_ok=True)
     long.to_parquet(out, compression="zstd", index=False)
     LOG.info("wrote forecast parquet rows=%d -> %s", len(long), out)
+
+    # Paired MAPE comparison matrix on the most-recent fold's per-series MAPE.
+    # NOT the canonical Diebold-Mariano test — DM requires per-period
+    # (actual, p_a, p_b) tuples which the current backtest summary does not
+    # retain. This is a paired Wilcoxon-shape test on per-series MAPE
+    # differences: positive median_diff means `a` has lower MAPE than `b`.
+    # Wire the true DM through after refactoring backtest to retain actuals.
+    paired_matrix: list[dict] = []
+    if cfg.run_dm_matrix and folds:
+        last = folds[-1]
+        methods = sorted(last.per_series["method"].unique())
+        mape_by_method: dict[str, "pd.Series"] = {}
+        for m in methods:
+            sub = last.per_series[last.per_series["method"] == m].set_index(group_cols)
+            mape_by_method[m] = sub["mape"].dropna()
+        for i, a in enumerate(methods):
+            for b in methods[i + 1 :]:
+                ma, mb = mape_by_method[a], mape_by_method[b]
+                # Align on common series.
+                common = ma.index.intersection(mb.index)
+                if len(common) < 4:
+                    continue
+                diff = (ma.loc[common] - mb.loc[common]).values
+                median_diff = float(pd.Series(diff).median())
+                # Wilcoxon signed-rank approximation: count of negative diffs
+                # under H0 = 0.5 → normal approx p-value.
+                n = len(diff)
+                neg = int((diff < 0).sum())
+                pos = int((diff > 0).sum())
+                from math import sqrt as _sqrt, erf as _erf
+                if neg + pos > 0:
+                    se = _sqrt((neg + pos) * 0.25)
+                    z = (neg - 0.5 * (neg + pos)) / max(se, 1e-9)
+                    p = 2.0 * (1.0 - 0.5 * (1.0 + _erf(abs(z) / _sqrt(2.0))))
+                else:
+                    z, p = 0.0, 1.0
+                paired_matrix.append({
+                    "a": a, "b": b, "n_paired": int(len(common)),
+                    "median_mape_diff": median_diff, "z": float(z), "p_value": float(p),
+                    "test": "paired_sign",
+                    "note": "median_diff < 0 means a's MAPE is lower than b's",
+                })
 
     metrics_out = {
         "name": cfg.name,
@@ -161,33 +236,41 @@ def run_pipeline(cfg: PipelineConfig, con: duckdb.DuckDBPyConnection) -> dict:
         "conformal": cfg.conformal,
         "backtest_folds": cfg.backtest_folds,
         "metrics_by_method": metrics_by_method,
+        "paired_method_comparison": paired_matrix,
+        "seed": cfg.seed,
     }
     mpath = Path(cfg.out_metrics_json)
     mpath.parent.mkdir(parents=True, exist_ok=True)
     mpath.write_text(json.dumps(metrics_out, indent=2, default=str))
     LOG.info("wrote metrics -> %s", mpath)
 
-    flat_metrics: dict[str, float] = {}
-    for m in metrics_by_method:
-        for k in ("mape", "smape", "mase", "coverage_80"):
-            if m.get(k) is not None:
-                flat_metrics[f"{m['method']}__{k}"] = float(m[k])
-    track_run(
-        name=cfg.name,
-        params={
-            "horizon": cfg.horizon,
-            "backends": list(models.keys()),
-            "ensemble_mode": cfg.ensemble_mode,
-            "conformal": cfg.conformal,
-            "conformal_alpha": cfg.conformal_alpha,
-            "backtest_folds": cfg.backtest_folds,
-            "season_length": cfg.season_length,
-            "freq": cfg.panel.freq,
-            "group_cols": list(cfg.panel.group_cols),
-            "n_series": metrics_out["n_series"],
-        },
-        metrics=flat_metrics,
-        artifacts={"forecast_parquet": str(out), "metrics_json": str(mpath)},
-        started_at=_t0,
-    )
+    if cfg.track:
+        flat_metrics: dict[str, float] = {}
+        for m in metrics_by_method:
+            for k in ("mape", "smape", "mase", "coverage_80"):
+                if m.get(k) is not None:
+                    flat_metrics[f"{m['method']}__{k}"] = float(m[k])
+        # Per-pipeline ledger file: avoids cross-contamination between runs of
+        # different pipelines in the same logs/ dir.
+        ledger_path = f"logs/forecast_runs__{cfg.name}.jsonl"
+        track_run(
+            name=cfg.name,
+            params={
+                "horizon": cfg.horizon,
+                "backends": list(models.keys()),
+                "ensemble_mode": cfg.ensemble_mode,
+                "conformal": cfg.conformal,
+                "conformal_alpha": cfg.conformal_alpha,
+                "backtest_folds": cfg.backtest_folds,
+                "season_length": cfg.season_length,
+                "freq": cfg.panel.freq,
+                "group_cols": list(cfg.panel.group_cols),
+                "n_series": metrics_out["n_series"],
+                "seed": cfg.seed,
+            },
+            metrics=flat_metrics,
+            artifacts={"forecast_parquet": str(out), "metrics_json": str(mpath)},
+            ledger_path=ledger_path,
+            started_at=_t0,
+        )
     return metrics_out

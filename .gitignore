@@ -20,3 +20,6 @@ examples/*/out/
 # DuckDB
 *.duckdb
 *.wal
+
+# Forecast pipeline run ledgers — per-machine, regenerated on every run
+/logs/
