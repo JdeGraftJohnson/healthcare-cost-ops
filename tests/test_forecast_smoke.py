@@ -1,6 +1,8 @@
 """Smoke tests — synthetic panel, every available backend produces a forecast."""
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -266,6 +268,122 @@ def test_empirical_band_applies_to_forecast(panel):
 
 
 # ── Graceful all-backends-fail (Issue 4.3) ──────────────────────────────────
+
+# ── True per-period Diebold-Mariano (Issue 5.2) ─────────────────────────────
+
+def test_per_period_dm_matrix_picks_winner(panel):
+    from services.forecast.eval import per_period_dm_matrix, FoldResult
+    # Two methods on the same actual values: A is near-perfect, B is noisy.
+    rng = np.random.default_rng(7)
+    times = pd.date_range("2025-01-01", periods=12, freq="MS")
+    actual_series = rng.normal(50, 5, 12)
+    pp = pd.DataFrame([
+        # method A — small noise
+        *[{"state": "S0", "cat": "X", "method": "A", "period": t,
+           "actual": float(a), "prediction": float(a + rng.normal(0, 0.5))}
+          for t, a in zip(times, actual_series)],
+        # method B — large noise
+        *[{"state": "S0", "cat": "X", "method": "B", "period": t,
+           "actual": float(a), "prediction": float(a + rng.normal(0, 5))}
+          for t, a in zip(times, actual_series)],
+    ])
+    fold = FoldResult(fold=0, cutoff=pd.Timestamp("2024-12-01"),
+                     per_series=pd.DataFrame(), per_period=pp)
+    out = per_period_dm_matrix([fold], group_cols=["state", "cat"], h=1)
+    assert len(out) == 1
+    entry = out[0]
+    assert entry["a"] == "A" and entry["b"] == "B"
+    # A has smaller squared error → dm_stat < 0 → "a beats b".
+    assert entry["dm_stat"] < 0
+    assert entry["p_value"] < 0.05
+    assert entry["test"] == "diebold_mariano_squared_error"
+
+
+# ── Model persistence (Issue 4.1) ───────────────────────────────────────────
+
+def test_persist_roundtrip_naive(tmp_path):
+    from services.forecast.persist import save_bundle, load_bundle
+    fits = {
+        ("S0", "X"): {"last_value": 50.0, "season_length": 12},
+        ("S1", "X"): {"last_value": 80.0, "season_length": 12},
+    }
+    out = save_bundle(
+        backend="naive", name="test_naive",
+        group_cols=("state", "cat"), time_col="period", target_col="y",
+        freq="MS", season_length=12, log_transform=False,
+        fits_by_series=fits, out_dir=tmp_path / "bundle",
+        notes="smoke test",
+    )
+    manifest, payload = load_bundle(out)
+    assert manifest.backend == "naive"
+    assert manifest.n_series == 2
+    assert manifest.log_transform is False
+    assert ("S0", "X") in payload["fits_by_series"]
+    assert payload["fits_by_series"][("S0", "X")]["last_value"] == 50.0
+
+
+# ── Champion-challenger (Issue 5.5) ─────────────────────────────────────────
+
+def test_champion_challenger_picks_latest_pair(tmp_path):
+    from services.forecast.compare import pick_champion_challenger, compute_deltas, _read_ledger
+    ledger = tmp_path / "ledger.jsonl"
+    with ledger.open("w") as f:
+        for run_id, ended_at, mape in [
+            ("run_1", 100, 0.05),
+            ("run_2", 200, 0.04),
+            ("run_3", 300, 0.045),  # mild regression
+        ]:
+            f.write(json.dumps({
+                "run_id": run_id, "ended_at": ended_at, "status": "completed",
+                "name": "test",
+                "metrics": {"final_test__sarima__mape": mape},
+            }) + "\n")
+    records = _read_ledger(ledger)
+    champ, chal = pick_champion_challenger(records)
+    assert champ["run_id"] == "run_2"
+    assert chal["run_id"] == "run_3"
+    deltas = compute_deltas(champ, chal,
+                            metric_keys=("final_test__sarima__mape",))
+    assert len(deltas) == 1
+    d = deltas[0]
+    assert d.delta == pytest.approx(0.005, abs=1e-9)
+    # MAPE going up = worse.
+    assert d.direction == "worse"
+
+
+def test_champion_challenger_first_run_no_champion(tmp_path):
+    from services.forecast.compare import pick_champion_challenger, _read_ledger
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text(json.dumps({
+        "run_id": "only", "ended_at": 1, "status": "completed", "name": "t",
+        "metrics": {},
+    }) + "\n")
+    champ, chal = pick_champion_challenger(_read_ledger(ledger))
+    assert champ is None
+    assert chal["run_id"] == "only"
+
+
+# ── Structured logging (Issue 4.2) ──────────────────────────────────────────
+
+def test_json_formatter_emits_valid_json():
+    import io, logging
+    from services.forecast.logging_config import JsonFormatter
+    buf = io.StringIO()
+    handler = logging.StreamHandler(buf)
+    handler.setFormatter(JsonFormatter())
+    log = logging.getLogger("test.json")
+    log.handlers = [handler]
+    log.setLevel(logging.INFO)
+    log.propagate = False
+    log.info("hello", extra={"series": 12})
+    parsed = json.loads(buf.getvalue().strip())
+    assert parsed["level"] == "INFO"
+    assert parsed["msg"] == "hello"
+    assert parsed["series"] == 12
+    assert parsed["logger"] == "test.json"
+
+
+# ── Graceful all-backends-fail (Issue 4.3) — existing test, kept ───────────
 
 def test_ensure_coverage_fills_missing_series():
     from services.forecast.pipeline import _ensure_coverage

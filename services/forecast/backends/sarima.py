@@ -15,6 +15,49 @@ from services.forecast.base import ForecastModel, ForecastResult
 LOG = logging.getLogger("forecast.sarima")
 
 
+def _fit_one_series(keys, ts, ctx):
+    """Module-level worker for ProcessPoolExecutor (picklable)."""
+    order, seasonal_order, enforce_stationarity, enforce_invertibility, horizon, freq = ctx
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            fit = SARIMAX(
+                ts, order=order, seasonal_order=seasonal_order,
+                enforce_stationarity=enforce_stationarity,
+                enforce_invertibility=enforce_invertibility,
+            ).fit(disp=False)
+            fc = fit.get_forecast(steps=horizon)
+            point = fc.predicted_mean
+            ci80 = fc.conf_int(alpha=0.20)
+            ci95 = fc.conf_int(alpha=0.05)
+    except Exception:
+        future_idx = pd.date_range(
+            ts.index[-1] + pd.tseries.frequencies.to_offset(freq),
+            periods=horizon, freq=freq,
+        )
+        point = pd.Series([ts.mean()] * horizon, index=future_idx)
+        sigma = float(ts.std(ddof=1) or abs(ts.mean()) * 0.15 or 1.0)
+        ci80 = pd.DataFrame({"lower": point - 1.2816 * sigma, "upper": point + 1.2816 * sigma})
+        ci95 = pd.DataFrame({"lower": point - 1.96 * sigma,   "upper": point + 1.96 * sigma})
+    # Sanity gate
+    ts_max = float(np.nanmax(np.abs(ts.values))) if len(ts) else 1.0
+    point_max = float(np.nanmax(np.abs(point.values)))
+    ci95_max = float(np.nanmax(np.abs(ci95.values))) if not ci95.empty else 0.0
+    if (point_max > 5.0 * (ts_max + 1.0)) or (ci95_max > 100.0 * (ts_max + 1.0)):
+        future_idx = point.index
+        point = pd.Series([ts.mean()] * len(future_idx), index=future_idx)
+        sigma = float(ts.std(ddof=1) or abs(ts.mean()) * 0.15 or 1.0)
+        ci80 = pd.DataFrame({"lower": point - 1.2816 * sigma, "upper": point + 1.2816 * sigma})
+        ci95 = pd.DataFrame({"lower": point - 1.96 * sigma,   "upper": point + 1.96 * sigma})
+    return ForecastResult(
+        series_key=keys, method="sarima", horizon=horizon, point=point,
+        lo80=ci80.iloc[:, 0], hi80=ci80.iloc[:, 1],
+        lo95=ci95.iloc[:, 0], hi95=ci95.iloc[:, 1],
+        in_sample_mape=None,
+        metadata={"order": str(order), "seasonal_order": str(seasonal_order)},
+    )
+
+
 class SarimaModel(ForecastModel):
     name = "sarima"
     requires_regular_grid = True
@@ -25,11 +68,15 @@ class SarimaModel(ForecastModel):
         seasonal_order: tuple[int, int, int, int] = (1, 1, 0, 12),
         enforce_stationarity: bool = False,
         enforce_invertibility: bool = False,
+        n_workers: int = 0,             # 0 = sequential; >0 = ProcessPoolExecutor with N workers
+        parallel_threshold: int = 50,   # only parallelize when n_series >= this
     ):
         self.order = order
         self.seasonal_order = seasonal_order
         self.enforce_stationarity = enforce_stationarity
         self.enforce_invertibility = enforce_invertibility
+        self.n_workers = n_workers
+        self.parallel_threshold = parallel_threshold
 
     def fit_predict(
         self,
@@ -41,12 +88,41 @@ class SarimaModel(ForecastModel):
         horizon: int,
         freq: str,
     ) -> list[ForecastResult]:
-        results: list[ForecastResult] = []
+        series_specs = []
         for keys, grp in panel.groupby(list(group_cols), sort=False):
-            if not isinstance(keys, tuple):
-                keys = (keys,)
+            if not isinstance(keys, tuple): keys = (keys,)
             ts = grp.sort_values(time_col).set_index(time_col)[target_col].astype(float)
             ts.index = pd.DatetimeIndex(ts.index, freq=freq)
+            series_specs.append((tuple(keys), ts))
+
+        use_parallel = (
+            self.n_workers > 0
+            and len(series_specs) >= self.parallel_threshold
+        )
+        if use_parallel:
+            from concurrent.futures import ProcessPoolExecutor, as_completed
+            LOG.info("sarima parallel fit: %d series across %d workers",
+                     len(series_specs), self.n_workers)
+            results: list[ForecastResult] = []
+            ctx = (self.order, self.seasonal_order,
+                   self.enforce_stationarity, self.enforce_invertibility,
+                   horizon, freq)
+            with ProcessPoolExecutor(max_workers=self.n_workers) as pool:
+                futures = {
+                    pool.submit(_fit_one_series, keys, ts, ctx): keys
+                    for keys, ts in series_specs
+                }
+                for fut in as_completed(futures):
+                    try:
+                        results.append(fut.result())
+                    except Exception as e:
+                        keys = futures[fut]
+                        LOG.warning("sarima worker failed for %s: %s", keys, e)
+            return results
+
+        # Sequential path (original behavior).
+        results: list[ForecastResult] = []
+        for keys, ts in series_specs:
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")

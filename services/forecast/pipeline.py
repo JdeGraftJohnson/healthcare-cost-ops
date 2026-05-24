@@ -15,7 +15,11 @@ from services.forecast.backends import available as available_backends
 from services.forecast.base import ForecastModel, ForecastResult
 from services.forecast.data import PanelSpec, load_panel, split_train_test
 from services.forecast.ensemble import ensemble
-from services.forecast.eval import rolling_origin_backtest, _score_per_series
+from services.forecast.eval import (
+    rolling_origin_backtest,
+    _score_per_series,
+    per_period_dm_matrix,
+)
 from services.forecast.intervals import (
     calibrate as calibrate_conformal,
     calibrate_multi as calibrate_multi_conformal,
@@ -326,6 +330,16 @@ def run_pipeline(cfg: PipelineConfig, con: duckdb.DuckDBPyConnection) -> dict:
     # retain. This is a paired Wilcoxon-shape test on per-series MAPE
     # differences: positive median_diff means `a` has lower MAPE than `b`.
     # Wire the true DM through after refactoring backtest to retain actuals.
+    # True per-period Diebold-Mariano now that the backtest retains per-period
+    # actuals + predictions. The paired-sign-test matrix remains for backward
+    # compatibility but DM is the headline.
+    dm_matrix: list[dict] = []
+    if cfg.run_dm_matrix and folds:
+        try:
+            dm_matrix = per_period_dm_matrix(folds, group_cols=group_cols, h=1)
+        except Exception as e:
+            LOG.warning("per-period DM matrix failed: %s", e)
+
     paired_matrix: list[dict] = []
     if cfg.run_dm_matrix and folds:
         last = folds[-1]
@@ -378,6 +392,7 @@ def run_pipeline(cfg: PipelineConfig, con: duckdb.DuckDBPyConnection) -> dict:
         "interval_calibration": (
             "empirical_quantile" if band_cal is not None else "model_native"
         ),
+        "dm_matrix": dm_matrix,
         "paired_method_comparison": paired_matrix,
         "n_fallback_series": len(fallback_series),
         "seed": cfg.seed,

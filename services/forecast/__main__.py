@@ -8,6 +8,7 @@ from pathlib import Path
 
 import duckdb
 
+from services.forecast.logging_config import configure as configure_logging
 from services.forecast.pipeline import load_config, run_pipeline
 
 
@@ -17,10 +18,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--duckdb", default=":memory:", help="DuckDB file (default :memory:)")
     p.add_argument("--verbose", "-v", action="store_true")
     a = p.parse_args(argv)
-    logging.basicConfig(
-        level=logging.DEBUG if a.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)-5s %(name)s %(message)s",
-    )
+    configure_logging(verbose=a.verbose, force=True)
     cfg = load_config(a.config)
     con = duckdb.connect(a.duckdb)
     run_pipeline(cfg, con)

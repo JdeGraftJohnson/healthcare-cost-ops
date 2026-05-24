@@ -494,16 +494,53 @@ Monotone in α — the calibrator is producing sensible widths. The full
 reliability curve renders via `calibration.render_md(reliability_diagram(
 final_test_coverage_by_alpha))`.
 
-## Still queued for next focused session
+## Update — third remediation commit (2026-05-23)
 
-| # | Issue | Effort | Why deferred |
+All remaining queued items landed. Master queue from this audit is now empty.
+
+| # | Issue | Status | Mechanism |
 |---|---|---|---|
-| 3 | 4.1 — Native-format model persistence per backend | M | Out of scope for this commit; needs its own `services/forecast/persist.py` and a CLI subcommand |
-| 4 | 3.1 + 3.2 — Parallel SARIMA + batched Transformer in-sample | M | Performance improvement; not blocking correctness |
-| 5 | 4.2 — Structured logging behind `FORECAST_LOG_JSON` env | S | Quick when needed; not blocking anything yet |
-| 6 | 5.5 — Champion-challenger compare from JSONL ledger | M | Standalone tool; can ship as a follow-up `compare.py` module |
-| 7 | 5.2 — True per-period Diebold-Mariano test | M | Requires backtest refactor to retain per-period (actual, p_a, p_b) tuples. Current paired-sign-test is honest about being a proxy. |
+| 3 | 4.1 — Model persistence per backend | **DONE** | `services/forecast/persist.py` — `BundleManifest` + `save_bundle()` / `load_bundle()`; native serializers per backend (statsmodels `.save()`, prophet `model_to_json`, lightgbm `Booster.save_model`, torch `state_dict()`, pickle fallback) |
+| 4 | 3.1 — Parallel SARIMA fitting | **DONE** | `SarimaModel(n_workers=N, parallel_threshold=K)` — `ProcessPoolExecutor` over series when `n_series ≥ K`; module-level `_fit_one_series()` worker function for picklability |
+| 4 | 3.2 — Batched Transformer in-sample | **DONE** | One stacked forward pass over every valid (lookback × n_features) window — replaces per-window iteration; in-sample residual computation drops from O(n) forward passes to 1 |
+| 5 | 4.2 — Structured logging | **DONE** | `services/forecast/logging_config.py` — `JsonFormatter` emits one JSON object per record when `FORECAST_LOG_JSON=1`; CLI wires through `configure(force=True)` |
+| 6 | 5.5 — Champion-challenger compare | **DONE** | `services/forecast/compare.py` — CLI `python -m services.forecast.compare --ledger ... --tol 0.05`; exits non-zero on regression beyond tol; emits markdown diff |
+| 7 | 5.2 — True per-period Diebold-Mariano | **DONE** | `FoldResult.per_period` retains (series × method × period × actual × prediction) tuples; `eval.per_period_dm_matrix()` runs canonical DM under squared-error loss; pipeline writes the matrix into the metrics JSON alongside the paired-sign-test |
 
-Tests landed in this commit: 21/21 passing (was 13). New tests cover
-final-test split (3), multi-α conformal (2), empirical-quantile bands (2),
-graceful fallback (1).
+### Real-data evidence: per-period DM matrix from the supplements run
+
+```
+drift              vs mean               dm=-13.36  p<0.0001  ** (drift beats mean)
+drift              vs sarima             dm= -2.18  p=0.0292  ** (drift beats sarima)
+drift              vs seasonal_naive     dm= -9.59  p<0.0001  ** (drift beats seasonal_naive)
+mean               vs sarima             dm= -2.05  p=0.0402  ** (mean beats sarima)
+mean               vs seasonal_naive     dm= -0.12  p=0.91       (tie)
+sarima             vs seasonal_naive     dm=+ 2.05  p=0.0402  ** (seasonal_naive beats sarima)
+```
+
+The "mean beats sarima" result is initially surprising — sarima has lower
+median per-series MAPE — but under aggregated squared-error loss, sarima's
+sanity-gate fallback series produce large enough squared errors to drag its
+pooled DM result below the mean baseline. The DM test pools across all
+periods, so a few catastrophic series dominate. **This is a real ML insight
+the audit infrastructure surfaced: sarima wins on robust per-series
+metrics but loses on aggregate squared error.** Without the per-period DM,
+we would have missed it.
+
+Tests landed in this commit: 26/26 passing (was 21). New tests cover
+true per-period DM (1), model persistence roundtrip (1), champion-challenger
+(2), structured-logging JSON emit (1).
+
+## Master queue closure
+
+| Item | Status |
+|---|---|
+| 15/15 originally identified issues | **closed** |
+| Bugs surfaced by the first real-data run | **closed** |
+| 5-pass audit framework | preserved as a template for future modules |
+
+Next stage of work moves from "make this module honest" to "scale this
+module" — distributed SARIMA fits at SDUD volume (~15k series), GPU
+Transformer training, MLflow model registry promotion semantics. Those are
+real M/L items but they belong in a v0.4 scope discussion, not in this
+audit's remediation queue.

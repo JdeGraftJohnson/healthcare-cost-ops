@@ -248,13 +248,20 @@ class TransformerModel(ForecastModel):
                     lookback_buf = np.vstack([lookback_buf[1:], next_row])
                 preds = np.array(preds_norm) * sd + mu
                 point = pd.Series(preds, index=pd.DatetimeIndex(future_idx))
-                # Residual sigma from in-sample on this group, in original units.
+                # Issue 3.2 — batched in-sample residual: stack every valid
+                # window into one forward pass instead of iterating per index.
                 in_sample_resid_norm = []
-                for i in range(self.lookback, len(history_feat)):
-                    x = torch.from_numpy(history_feat[i - self.lookback:i]).float().unsqueeze(0).to(self.device)
-                    g = torch.tensor([gid]).long().to(self.device)
-                    yhat_n = float(model(x, g).cpu().numpy()[0])
-                    in_sample_resid_norm.append(history_feat[i, 0] - yhat_n)
+                n_windows = max(0, len(history_feat) - self.lookback)
+                if n_windows > 0:
+                    windows = np.stack([
+                        history_feat[i - self.lookback:i]
+                        for i in range(self.lookback, len(history_feat))
+                    ])
+                    x_batch = torch.from_numpy(windows).float().to(self.device)
+                    g_batch = torch.full((n_windows,), gid, dtype=torch.long, device=self.device)
+                    yhat_batch = model(x_batch, g_batch).cpu().numpy()
+                    targets = history_feat[self.lookback:, 0]
+                    in_sample_resid_norm = (targets - yhat_batch).tolist()
                 if in_sample_resid_norm:
                     sigma = float(np.std(in_sample_resid_norm, ddof=1) * sd) or abs(preds.mean()) * 0.15 or 1.0
                 else:

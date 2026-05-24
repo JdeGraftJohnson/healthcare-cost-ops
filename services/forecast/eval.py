@@ -18,6 +18,57 @@ class FoldResult:
     fold: int
     cutoff: pd.Timestamp
     per_series: pd.DataFrame  # columns: group_cols + [method, mape, smape, mase, pinball_80, coverage_80]
+    # Per-period (series × method × time) raw actual + prediction tuples.
+    # Wired in for true per-period Diebold-Mariano (Issue 5.2). Schema:
+    # group_cols + [method, period, actual, prediction]
+    per_period: pd.DataFrame = None  # type: ignore[assignment]
+
+
+def per_period_dm_matrix(
+    fold_results: list[FoldResult],
+    *,
+    group_cols: Sequence[str],
+    h: int = 1,
+) -> list[dict]:
+    """Canonical per-period Diebold-Mariano across method pairs.
+
+    Pools per-period (actual, p_a, p_b) tuples across all series in all
+    folds and runs DM with squared-error loss. Returns one row per ordered
+    method pair where method_a precedes method_b alphabetically. `dm < 0`
+    means a's squared error is lower than b's (a beats b).
+    """
+    if not fold_results:
+        return []
+    frames = [fr.per_period for fr in fold_results if fr.per_period is not None]
+    if not frames:
+        return []
+    all_pp = pd.concat(frames, ignore_index=True)
+    methods = sorted(all_pp["method"].unique())
+    out: list[dict] = []
+    join_keys = list(group_cols) + ["period"]
+    for i, a in enumerate(methods):
+        a_df = all_pp[all_pp["method"] == a][join_keys + ["actual", "prediction"]]
+        a_df = a_df.rename(columns={"prediction": "pred_a"})
+        for b in methods[i + 1 :]:
+            b_df = all_pp[all_pp["method"] == b][join_keys + ["prediction"]]
+            b_df = b_df.rename(columns={"prediction": "pred_b"})
+            merged = a_df.merge(b_df, on=join_keys, how="inner")
+            merged = merged.dropna(subset=["actual", "pred_a", "pred_b"])
+            if len(merged) < 8:
+                continue
+            dm, p = diebold_mariano(
+                merged["actual"].values,
+                merged["pred_a"].values,
+                merged["pred_b"].values,
+                h=h,
+            )
+            out.append({
+                "a": a, "b": b, "n": int(len(merged)),
+                "dm_stat": dm, "p_value": p, "h": h,
+                "test": "diebold_mariano_squared_error",
+                "note": "dm_stat < 0 means a's squared error is lower than b's",
+            })
+    return out
 
 
 def diebold_mariano(
@@ -95,7 +146,12 @@ def rolling_origin_backtest(
         )
         per_series["fold"] = f
         per_series["cutoff"] = cutoff
-        folds.append(FoldResult(fold=f, cutoff=cutoff, per_series=per_series))
+        per_period = _emit_per_period(
+            results=all_results, test=test,
+            group_cols=group_cols, time_col=time_col, target_col=target_col,
+        )
+        per_period["fold"] = f
+        folds.append(FoldResult(fold=f, cutoff=cutoff, per_series=per_series, per_period=per_period))
 
     summary = pd.concat([fr.per_series for fr in folds], ignore_index=True)
     return folds, summary
@@ -171,6 +227,41 @@ def _score_per_series(
             row["coverage_95"] = float(np.mean((a >= lo95) & (a <= hi95)))
             row["interval_width_95"] = float(np.mean(hi95 - lo95))
         rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _emit_per_period(
+    *,
+    results: list[ForecastResult],
+    test: pd.DataFrame,
+    group_cols: Sequence[str],
+    time_col: str,
+    target_col: str,
+) -> pd.DataFrame:
+    """Flat per-period (series × method × time) actual+prediction frame.
+
+    One row per (series, method, period) at intersection of forecast index
+    and actual index. Feeds the canonical Diebold-Mariano test.
+    """
+    rows = []
+    test_by_key: dict[SeriesKey, pd.Series] = {
+        tuple(k if isinstance(k, tuple) else (k,)): g.set_index(time_col)[target_col].astype(float)
+        for k, g in test.groupby(list(group_cols), sort=False)
+    }
+    for r in results:
+        actual = test_by_key.get(r.series_key)
+        if actual is None or len(actual) == 0:
+            continue
+        common = actual.index.intersection(r.point.index)
+        for t in common:
+            row = {col: val for col, val in zip(group_cols, r.series_key)}
+            row.update({
+                "method": r.method,
+                "period": t,
+                "actual": float(actual.loc[t]),
+                "prediction": float(r.point.loc[t]),
+            })
+            rows.append(row)
     return pd.DataFrame(rows)
 
 
