@@ -1,0 +1,45 @@
+name: sdud_state_spend_quarterly
+horizon: 4                     # forecast 4 quarters (1 year) ahead
+backtest_folds: 2              # 12 quarters → 4 train + 4 backtest + 4 holdout
+ensemble_mode: inverse_mape
+conformal: true
+conformal_alphas: [0.50, 0.20, 0.10, 0.05]
+final_holdout_periods: 4
+season_length: 4               # quarterly seasonality
+
+panel:
+  # Real CMS Medicaid State Drug Utilization Data, aggregated to quarterly
+  # state-level total reimbursement. Source: data.medicaid.gov public CSVs,
+  # pulled directly via DuckDB httpfs in `build_sdud_silver.py` — no synthetic.
+  #
+  # Local development path; for Azure production replace with
+  #   az://stasiprod1eus2.blob.core.windows.net/healthcare/silver/snapshot=YYYY-MM-DD-cms/fact_sdud.parquet
+  sql: |
+    SELECT
+      state_code,
+      period,
+      total_reimb AS spend
+    FROM read_parquet('${SDUD_SILVER_URL:-examples/medicaid_sdud_2026/out/silver/snapshot=2026-05-23-cms/fact_sdud.parquet}')
+    WHERE state_code IS NOT NULL
+      AND state_code != 'XX'        -- drop national-aggregate roll-up
+      AND total_reimb > 0
+    ORDER BY state_code, period
+  group_cols: [state_code]
+  time_col: period
+  target_col: spend
+  freq: QS                          # quarter-start
+  min_obs_per_series: 6             # 12-quarter span → require at least 6 obs
+  fill_gaps: ffill
+  log_transform: true               # USD spend is strictly positive
+
+backends:
+  mean: {}
+  drift: {}
+  naive:
+    season_length: 4
+  sarima:
+    order:          [1, 1, 1]
+    seasonal_order: [0, 1, 1, 4]   # quarterly seasonal
+
+out_parquet:       examples/medicaid_sdud_2026/out/silver/snapshot=2026-05-23-cms/state_spend_forecast.parquet
+out_metrics_json:  examples/medicaid_sdud_2026/out/silver/snapshot=2026-05-23-cms/state_spend_forecast_metrics.json
